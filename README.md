@@ -28,6 +28,32 @@ select * from search_entries('thin pool cleanup', 'homelab', 5);
 
 - Claude memory notes: `~/.claude/projects/*/memory/*.md` plus any `extraMemoryRoots`, de-duplicated by real path and content
 - Obsidian vault: every page except `Operations/Credentials.md`, split into one entry per `##` section
+- `instructionFiles`: CLAUDE.md files (glob patterns with `*`), one rule entry per `##` section
+- `exportMemoryRoots`: memory exported from claude.ai; `exportMemoryTypes` maps a file or top folder to a type
+- `chatSummaryRoots`: one markdown file per chat (title, `Chat link:`, `Last updated:`, `## Summary`), stored as events
+- `documentRoots`: plain markdown documents, split per section
+
+Every source carries the machine's `host` (config `host`, else the hostname). A seed prunes this host's sources whose files are gone and never touches other hosts' rows or `manual` sources. Seeds take a Postgres advisory lock, so machines never write at the same time.
+
+## Keeping it in sync
+
+`scripts/sync.sh` runs the seeder quietly with a local lock and a pending flag, so bursts of edits collapse into one or two runs. Log: `~/.local/state/memory-store/sync.log`.
+
+| Command | Use |
+|---|---|
+| `scripts/sync.sh run` | sync now |
+| `scripts/sync.sh hook` | Claude Code `PostToolUse` hook: reads the hook JSON and syncs in the background only when the tool touched a memory note, CLAUDE.md, the vault or the archive (`MEMORY_SYNC_MATCH`) |
+| `scripts/sync.sh bg` | background sync, for `SessionEnd` |
+| `scripts/sync.sh install` / `uninstall` | macOS launchd job every `MEMORY_SYNC_INTERVAL` seconds (default 900) |
+
+Hooks in `~/.claude/settings.json`:
+
+```json
+"PostToolUse": [{ "matcher": "Write|Edit|MultiEdit|NotebookEdit|Bash", "hooks": [{ "type": "command", "command": "<repo>/scripts/sync.sh hook", "timeout": 10 }] }],
+"SessionEnd": [{ "hooks": [{ "type": "command", "command": "<repo>/scripts/sync.sh bg", "timeout": 10 }] }]
+```
+
+On Linux, run `scripts/sync.sh run` from a systemd timer or cron instead of `install`.
 
 ## Local config
 

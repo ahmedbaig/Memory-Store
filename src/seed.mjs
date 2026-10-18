@@ -1,15 +1,17 @@
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync, existsSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { homedir, hostname, tmpdir } from 'node:os';
 import { basename, dirname, join, relative } from 'node:path';
 import YAML from 'yaml';
 import { connect, inTransaction, withClient } from './db.mjs';
 import { config } from './config.mjs';
 
 const HOME = homedir();
+const HOST = config.host ?? hostname();
 const { claudeProjects: CLAUDE_PROJECTS, extraMemoryRoots, vault: VAULT, vaultSkip: VAULT_SKIP, homelabDirs: HOMELAB_DIRS, workRe: WORK_RE, homelabRe: HOMELAB_RE, homeProject, projectFolderPrefixes } = config;
-const KIND_BY_TYPE = { feedback: 'rule', user: 'profile', project: 'project', reference: 'reference' };
+const KIND_BY_TYPE = { feedback: 'rule', user: 'profile', project: 'project', reference: 'reference', entity: 'entity' };
+const SEEDED_KINDS = ['memory_file', 'vault_page', 'instructions', 'export_memory', 'chat_summary', 'document'];
 
 const sha256 = text => createHash('sha256').update(text).digest('hex');
 const count = (re, text) => (text.match(re) ?? []).length;
@@ -176,6 +178,161 @@ const collectVault = () =>
       return { kind: 'vault_page', uri: `obsidian://${rel}`, title, hash: sha256(content), content, meta: { path: rel, ...meta }, entries: [page, ...sectionEntries] };
     });
 
+const walkIfExists = dir => (existsSync(dir) ? walk(dir) : []);
+
+const globMatch = part => new RegExp(`^${part.split('*').map(escapeRe).join('[^/]*')}$`);
+
+const expandGlob = pattern =>
+  pattern
+    .split('/')
+    .slice(1)
+    .reduce(
+      (paths, part) =>
+        paths.flatMap(p =>
+          !part.includes('*')
+            ? [join(p, part)]
+            : existsSync(p) && statSync(p).isDirectory()
+              ? readdirSync(p).filter(n => globMatch(part).test(n)).map(n => join(p, n))
+              : [],
+        ),
+      ['/'],
+    )
+    .filter(p => existsSync(p));
+
+const uniqueReal = paths => [...new Map(paths.map(p => [realpathSync(p), p])).keys()];
+
+const sectionedEntries = ({ title, body, scope, pageKind, sectionKind, project = null, tags, validFrom, data, provenance = 'imported', confidence = 0.8, summary = null }) => {
+  const { preamble, sections } = splitSections(body);
+  const base = { scope, project, tags, provenance, confidence, validFrom };
+  return [
+    { ...base, anchor: 'page', kind: pageKind, title, summary, body: preamble || summary || title, links: wikilinks(preamble), data },
+    ...sections.map(s => ({
+      ...base,
+      anchor: s.anchor,
+      kind: sectionKind,
+      scope: inferScope(`${s.heading}\n${s.text}`, null) === 'work' ? 'work' : scope,
+      title: `${title} › ${s.heading}`,
+      summary: null,
+      body: s.text || s.heading,
+      links: wikilinks(s.text),
+      partOf: 'page',
+      data: { ...data, heading: s.heading },
+    })),
+  ];
+};
+
+const instructionTitle = real => {
+  const dir = dirname(real);
+  return dir === HOME ? 'CLAUDE.md · ~' : dir === join(HOME, '.claude') ? 'CLAUDE.md · ~/.claude' : `CLAUDE.md · ${basename(dir)}`;
+};
+
+const collectInstructions = () =>
+  uniqueReal(config.instructionFiles.flatMap(expandGlob)).map(real => {
+    const content = readFileSync(real, 'utf8');
+    const title = instructionTitle(real);
+    const project = [HOME, join(HOME, '.claude')].includes(dirname(real)) ? null : basename(dirname(real));
+    return {
+      kind: 'instructions',
+      uri: `file://${real}`,
+      title,
+      hash: sha256(content),
+      content,
+      meta: { path: real },
+      entries: sectionedEntries({ title, body: content, scope: inferScope(content), pageKind: 'rule', sectionKind: 'rule', project, tags: ['instructions'], validFrom: statSync(real).mtime.toISOString(), data: { path: real }, provenance: 'user', confidence: 0.9 }),
+    };
+  });
+
+const exportMemoryType = (meta, rel) => meta.metadata?.type ?? meta.type ?? config.exportMemoryTypes[rel] ?? config.exportMemoryTypes[rel.split('/')[0]] ?? 'fact';
+
+const collectExportMemory = () =>
+  config.exportMemoryRoots.flatMap(root =>
+    walkIfExists(root).map(path => {
+      const rel = relative(root, path);
+      const content = readFileSync(path, 'utf8');
+      const { meta, body } = splitFrontmatter(content);
+      const name = meta.name ?? basename(path, '.md');
+      const type = exportMemoryType(meta, rel);
+      return {
+        kind: 'export_memory',
+        uri: `file://${realpathSync(path)}`,
+        title: name,
+        hash: sha256(content),
+        content,
+        meta: { path: rel, description: meta.description ?? null, type },
+        entries: [
+          {
+            anchor: 'file',
+            kind: KIND_BY_TYPE[type] ?? 'fact',
+            scope: inferScope(`${name} ${meta.description ?? ''} ${body}`),
+            project: null,
+            title: name,
+            summary: meta.description ?? null,
+            body: body.trim(),
+            tags: [type, 'claude.ai'],
+            provenance: 'user',
+            confidence: 0.8,
+            validFrom: statSync(path).mtime.toISOString(),
+            links: wikilinks(body),
+            data: { file: rel },
+          },
+        ],
+      };
+    }),
+  );
+
+const collectChatSummaries = () =>
+  config.chatSummaryRoots.flatMap(root =>
+    walkIfExists(root).map(path => {
+      const content = readFileSync(path, 'utf8');
+      const title = content.match(/^# (.+)$/m)?.[1].trim() ?? basename(path, '.md');
+      const date = content.match(/Last updated:\s*(\d{4}-\d{2}-\d{2})/)?.[1] ?? basename(path).match(/^\d{4}-\d{2}-\d{2}/)?.[0];
+      const link = content.match(/Chat link:\s*(\S+)/)?.[1] ?? null;
+      const body = (content.split(/^## Summary\s*$/m)[1] ?? content).trim();
+      return {
+        kind: 'chat_summary',
+        uri: `file://${realpathSync(path)}`,
+        title,
+        hash: sha256(content),
+        content,
+        meta: { path: relative(root, path), link, date },
+        entries: [
+          {
+            anchor: 'chat',
+            kind: 'event',
+            scope: inferScope(`${title}\n${body}`),
+            project: null,
+            title,
+            summary: date ? `claude.ai chat, ${date}` : 'claude.ai chat',
+            body,
+            tags: ['chat', 'claude.ai'],
+            provenance: 'imported',
+            confidence: 0.6,
+            validFrom: date ? new Date(date).toISOString() : statSync(path).mtime.toISOString(),
+            links: [],
+            data: { link, file: basename(path) },
+          },
+        ],
+      };
+    }),
+  );
+
+const collectDocuments = () =>
+  config.documentRoots.flatMap(root =>
+    walkIfExists(root).map(path => {
+      const content = readFileSync(path, 'utf8');
+      const title = content.match(/^# (.+)$/m)?.[1].trim() ?? basename(path, '.md');
+      return {
+        kind: 'document',
+        uri: `file://${realpathSync(path)}`,
+        title,
+        hash: sha256(content),
+        content,
+        meta: { path: relative(root, path) },
+        entries: sectionedEntries({ title, body: content, scope: inferScope(content), pageKind: 'page', sectionKind: 'section', tags: ['document'], validFrom: statSync(path).mtime.toISOString(), data: { path: relative(root, path) } }),
+      };
+    }),
+  );
+
 const REGEX_REDACTIONS = [
   [/((?:password|passwd|pwd|secret|token|api[_-]?key)\s*(?:[:=]|\bis\b)\s*[`"']?)(?![$<{]|\[REDACTED)([^\s`'"|,]{4,})/gi, '$1[REDACTED]'],
   [/(\bcurl\b[^\n]*?\s-u\s+'?[^:\s']+:)([^\s']+)/g, '$1[REDACTED]'],
@@ -273,8 +430,11 @@ const redactAll = sources => {
 };
 
 const upsertSource = async (client, s) => {
-  const existing = (await client.query('select id, sha256 from source where uri = $1', [s.uri])).rows[0];
-  if (existing && existing.sha256 === s.hash && !process.argv.includes('--force')) return { id: existing.id, changed: false };
+  const existing = (await client.query(`select id, sha256, meta->>'host' as host from source where uri = $1`, [s.uri])).rows[0];
+  if (existing && existing.sha256 === s.hash && !process.argv.includes('--force')) {
+    if (existing.host !== HOST) await client.query(`update source set meta = meta || jsonb_build_object('host', $2::text) where id = $1`, [existing.id, HOST]);
+    return { id: existing.id, changed: false };
+  }
   const { rows } = await client.query(
     `insert into source (kind, uri, title, sha256, content, meta) values ($1, $2, $3, $4, $5, $6)
      on conflict (uri) do update set title = excluded.title, sha256 = excluded.sha256, content = excluded.content, meta = excluded.meta, imported_at = now()
@@ -296,7 +456,13 @@ const insertEntry = (client, sourceId, e) =>
 
 const storeSources = (pool, sources) =>
   inTransaction(pool, async client => {
-    const stats = { new: 0, unchanged: 0, entries: 0 };
+    const stats = { new: 0, unchanged: 0, entries: 0, pruned: 0 };
+    stats.pruned = (
+      await client.query(
+        `delete from source where kind = any($1) and (meta->>'host' = $2 or meta->>'host' is null) and not (uri = any($3))`,
+        [SEEDED_KINDS, HOST, sources.map(s => s.uri)],
+      )
+    ).rowCount;
     for (const s of sources) {
       const { id, changed } = await upsertSource(client, s);
       if (!changed) {
@@ -315,11 +481,13 @@ const storeSources = (pool, sources) =>
 const rebuildRelations = (pool, sources) =>
   inTransaction(pool, async client => {
     const { rows } = await client.query(
-      `select e.id, e.anchor, e.title, e.kind, s.uri, s.title as source_title from entry e join source s on s.id = e.source_id where s.kind in ('memory_file', 'vault_page')`,
+      `select e.id, e.anchor, e.title, e.kind, s.uri, s.title as source_title from entry e join source s on s.id = e.source_id
+       where s.kind = any($1) order by (s.kind = 'memory_file'), s.id`,
+      [SEEDED_KINDS],
     );
     const byUriAnchor = new Map(rows.map(r => [`${r.uri}#${r.anchor}`, r.id]));
     const target = new Map();
-    rows.filter(r => r.anchor === 'page' || r.anchor === 'file').forEach(r => {
+    rows.filter(r => ['page', 'file', 'chat'].includes(r.anchor)).forEach(r => {
       target.set(r.source_title.toLowerCase(), r.id);
       target.set(basename(r.uri.replace(/^\w+:\/\//, ''), '.md').toLowerCase(), r.id);
     });
@@ -354,15 +522,32 @@ const summary = pool =>
     client.query(`select scope, kind, count(*)::int as n from current_entry group by 1, 2 order by 1, 2`).then(r => r.rows),
   );
 
+const SEED_LOCK = 'memory-store-seed';
+
 knownRedact = knownRedactor(knownSecrets());
 const pool = connect();
-const memory = collectMemory();
-const vault = collectVault();
-const sources = [...memory, ...vault];
-const leaks = redactAll(sources);
-console.log(`collected ${memory.length} memory files, ${vault.length} vault pages, ${sources.reduce((n, s) => n + s.entries.length, 0)} entries; gitleaks findings redacted: ${leaks}`);
-console.log('store', await storeSources(pool, sources));
-const rel = await rebuildRelations(pool, sources);
-console.log(`relations: ${rel.made}; unresolved links: ${rel.unresolved.length ? rel.unresolved.join(', ') : 'none'}`);
-console.table(await summary(pool));
-await pool.end();
+const lock = await pool.connect();
+await lock.query('select pg_advisory_lock(hashtext($1))', [SEED_LOCK]);
+try {
+  const collected = {
+    memory: collectMemory(),
+    vault: collectVault(),
+    instructions: collectInstructions(),
+    exportMemory: collectExportMemory(),
+    chats: collectChatSummaries(),
+    documents: collectDocuments(),
+  };
+  const sources = Object.values(collected).flat();
+  sources.forEach(s => (s.meta.host = HOST));
+  const leaks = redactAll(sources);
+  const counts = Object.entries(collected).map(([k, v]) => `${v.length} ${k}`).join(', ');
+  console.log(`${new Date().toISOString()} host ${HOST}: collected ${counts}; ${sources.reduce((n, s) => n + s.entries.length, 0)} entries; gitleaks findings redacted: ${leaks}`);
+  console.log('store', await storeSources(pool, sources));
+  const rel = await rebuildRelations(pool, sources);
+  console.log(`relations: ${rel.made}; unresolved links: ${rel.unresolved.length ? rel.unresolved.join(', ') : 'none'}`);
+  if (!process.argv.includes('--quiet')) console.table(await summary(pool));
+} finally {
+  await lock.query('select pg_advisory_unlock(hashtext($1))', [SEED_LOCK]);
+  lock.release();
+  await pool.end();
+}
