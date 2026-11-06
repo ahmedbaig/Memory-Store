@@ -7,7 +7,7 @@ STATE="${MEMORY_SYNC_STATE:-$HOME/.local/state/memory-store}"
 LOG="$STATE/sync.log"
 LOCK="$STATE/lock"
 PENDING="$STATE/pending"
-MATCH="${MEMORY_SYNC_MATCH:-/memory/[^/ ]+\.md|CLAUDE\.md|Obsidian Vault/|/Archive/}"
+MATCH="${MEMORY_SYNC_MATCH:-/memory/[^/ ]+\.md|CLAUDE\.md|Obsidian Vault/|/Archive/|/Work/(PersonalProjects|home-lab)/[^ ]+\.md}"
 LABEL="${MEMORY_SYNC_LABEL:-memory-store.sync}"
 INTERVAL="${MEMORY_SYNC_INTERVAL:-900}"
 

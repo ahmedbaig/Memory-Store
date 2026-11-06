@@ -22,7 +22,7 @@ const listMd = dir => (existsSync(dir) ? readdirSync(dir).filter(f => f.endsWith
 
 const walk = dir =>
   readdirSync(dir, { withFileTypes: true }).flatMap(d => {
-    if (d.name.startsWith('.')) return [];
+    if (d.name.startsWith('.') || d.name === 'node_modules') return [];
     const path = join(dir, d.name);
     return d.isDirectory() ? walk(path) : d.name.endsWith('.md') ? [path] : [];
   });
@@ -356,7 +356,7 @@ const flattenSecrets = (value, key = '') =>
 
 const sopsYamlFiles = dir =>
   readdirSync(dir, { withFileTypes: true }).flatMap(d => {
-    if (d.name.startsWith('.')) return [];
+    if (d.name.startsWith('.') || d.name === 'node_modules') return [];
     const path = join(dir, d.name);
     return d.isDirectory() ? sopsYamlFiles(path) : d.name.endsWith('.sops.yaml') ? [path] : [];
   });
