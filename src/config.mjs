@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { transcriptDefaults } from './transcripts.mjs';
 
 const HOME = homedir();
 const file = process.env.MEMORY_STORE_CONFIG ?? join(dirname(fileURLToPath(import.meta.url)), '../memory-store.config.json');
@@ -20,6 +21,7 @@ const defaults = {
   chatSummaryRoots: [],
   documentRoots: [],
   host: null,
+  transcripts: {},
   workPattern: 'a^',
   homelabPattern: 'proxmox|homelab|\\bCT ?1\\d\\d\\b|gitlab\\.lab|adguard|wireguard|thin pool|grafana|prometheus|obsidian|unbound',
 };
@@ -36,6 +38,7 @@ export const config = {
   exportMemoryRoots: loaded.exportMemoryRoots.map(expand),
   chatSummaryRoots: loaded.chatSummaryRoots.map(expand),
   documentRoots: loaded.documentRoots.map(expand),
+  transcripts: { ...transcriptDefaults, ...loaded.transcripts },
   vault: expand(loaded.vault),
   vaultSkip: new Set(loaded.vaultSkip),
   homelabDirs: new Set(loaded.homelabDirs),

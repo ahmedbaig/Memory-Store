@@ -6,6 +6,7 @@ import { basename, dirname, join, relative } from 'node:path';
 import YAML from 'yaml';
 import { connect, inTransaction, withClient } from './db.mjs';
 import { config } from './config.mjs';
+import { planTranscripts, storeTranscripts } from './transcripts.mjs';
 
 const HOME = homedir();
 const HOST = config.host ?? hostname();
@@ -522,6 +523,31 @@ const summary = pool =>
     client.query(`select scope, kind, count(*)::int as n from current_entry group by 1, 2 order by 1, 2`).then(r => r.rows),
   );
 
+const workSlug = slug => {
+  const tail = slug.slice(homeProject.length).replace(/^-/, '').replace(/^Work-/, '');
+  return slug.startsWith(homeProject) && projectFolderPrefixes.some(p => tail === p || tail.startsWith(`${p}-`));
+};
+
+const syncTranscripts = async pool => {
+  const started = Date.now();
+  const plan = await withClient(pool, client =>
+    planTranscripts(client, {
+      root: CLAUDE_PROJECTS,
+      host: HOST,
+      opts: { ...config.transcripts, force: process.argv.includes('--force') },
+      helpers: { inferScope, workSlug, project: slug => (slug.startsWith(homeProject) ? projectFromEncoded(slug) : slug) },
+    }),
+  );
+  plan.sources.forEach(s => (s.meta.host = HOST));
+  const leaks = redactAll(plan.sources);
+  const redactedEntries = plan.sources.reduce((n, s) => n + s.entries.filter(e => e.redacted).length, 0);
+  const stats = await storeTranscripts(pool, plan, { host: HOST, inTransaction });
+  console.log(
+    `transcripts: ${plan.files} files, ${plan.unchanged} unchanged, ${stats.full} full, ${stats.appended} appended, ${stats.touched} touched, +${stats.entries} entries, pruned ${stats.pruned}; gitleaks findings redacted: ${leaks}; entries with redactions: ${redactedEntries}; parse ${plan.parseMs}ms, total ${Date.now() - started}ms`,
+  );
+  plan.skipped.forEach(s => console.log(`transcript skipped: ${s.uri} (${s.reason})`));
+};
+
 const SEED_LOCK = 'memory-store-seed';
 
 knownRedact = knownRedactor(knownSecrets());
@@ -545,6 +571,7 @@ try {
   console.log('store', await storeSources(pool, sources));
   const rel = await rebuildRelations(pool, sources);
   console.log(`relations: ${rel.made}; unresolved links: ${rel.unresolved.length ? rel.unresolved.join(', ') : 'none'}`);
+  if (config.transcripts.enabled) await syncTranscripts(pool);
   if (!process.argv.includes('--quiet')) console.table(await summary(pool));
 } finally {
   await lock.query('select pg_advisory_unlock(hashtext($1))', [SEED_LOCK]);

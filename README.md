@@ -16,7 +16,7 @@ npm run seed -- --force  # re-import everything
 | Table | What |
 |---|---|
 | `source` | One imported file (Claude memory note, vault page) with its full text and hash |
-| `entry` | One unit of knowledge: `kind` (rule, fact, decision, procedure, event, entity, profile, reference, project, page, section), `scope` (work, personal, homelab), `project`, `provenance` (user, inferred, verified, imported), `confidence`, `valid_from`/`valid_to`, `superseded_by`, `verify_cmd`, `embedding` |
+| `entry` | One unit of knowledge: `kind` (rule, fact, decision, procedure, event, entity, profile, reference, project, page, section, turn), `scope` (work, personal, homelab), `project`, `provenance` (user, inferred, verified, imported), `confidence`, `valid_from`/`valid_to`, `superseded_by`, `verify_cmd`, `embedding` |
 | `relation` | Typed edges between entries (`links_to` from `[[wikilinks]]`, `part_of` from page sections) |
 | `current_entry` | View of entries that are neither superseded nor expired |
 
@@ -32,6 +32,7 @@ select * from search_entries('thin pool cleanup', 'homelab', 5);
 - `exportMemoryRoots`: memory exported from claude.ai; `exportMemoryTypes` maps a file or top folder to a type
 - `chatSummaryRoots`: one markdown file per chat (title, `Chat link:`, `Last updated:`, `## Summary`), stored as events
 - `documentRoots`: plain markdown documents, split per section
+- Claude Code session transcripts: `~/.claude/projects/*/*.jsonl` plus subagent transcripts in `<session>/subagents/`, one `transcript` source per file (session id, project, cwd, branch, start/end, message counts, title) and one `turn` entry per user turn, split at `chunkChars`. User and assistant text, tool calls and tool outputs are kept in order with role and timestamp; tool input/output longer than `toolInputChars` / `toolOutputChars` is cut in the middle with a marker. Unchanged files (size + mtime) are skipped, grown files are parsed from the last stored offset and appended, anything else is re-imported. Settings live under `transcripts` in the config (`enabled`, `include` / `exclude` globs on the project folder name, `subagents`, size caps, `maxFileBytes`)
 
 Every source carries the machine's `host` (config `host`, else the hostname). A seed prunes this host's sources whose files are gone and never touches other hosts' rows or `manual` sources. Seeds take a Postgres advisory lock, so machines never write at the same time.
 

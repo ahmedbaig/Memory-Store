@@ -2,5 +2,15 @@
   "extraMemoryRoots": ["~/Work/shared-agents/projects"],
   "projectFolderPrefixes": ["CLIENT"],
   "workPattern": "acme|\\bTICKET-\\d+",
-  "homelabPattern": "proxmox|homelab|\\bCT ?1\\d\\d\\b|grafana|prometheus"
+  "homelabPattern": "proxmox|homelab|\\bCT ?1\\d\\d\\b|grafana|prometheus",
+  "transcripts": {
+    "enabled": true,
+    "include": ["*"],
+    "exclude": ["-private-tmp-*"],
+    "subagents": true,
+    "chunkChars": 16000,
+    "toolInputChars": 8000,
+    "toolOutputChars": 16000,
+    "maxFileBytes": 0
+  }
 }
